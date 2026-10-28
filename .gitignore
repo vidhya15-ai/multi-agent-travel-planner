@@ -1,0 +1,9 @@
+# Environment & Python
+langgraph_env2/
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Streamlit config
+.streamlit/
