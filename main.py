@@ -1,5 +1,5 @@
 import os
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, Literal
 import operator
 
 import psycopg
@@ -34,6 +34,48 @@ class TravelState(TypedDict):
     hotel_result: str
     itinerary: str
     llm_calls: int
+
+def intent_classifier(state: TravelState) -> Literal["travel_plan", "general_chat"]:
+    """Classifies incoming user query to route between travel workflow and small talk/guardrails."""
+    query = state["user_query"].strip()
+    classification_prompt = f"""
+    Classify the following user query into one of two categories:
+    1. 'TRAVEL_PLAN': The user is specifically asking for travel planning, flight options, hotel suggestions, or itineraries.
+    2. 'GENERAL_CHAT': Greetings (like 'hi', 'hello'), casual small talk, or non-travel prompts.
+
+    User Query: "{query}"
+
+    Respond with ONLY 'TRAVEL_PLAN' or 'GENERAL_CHAT'.
+    """
+    response = llm.invoke([
+        SystemMessage(content="You are a classifier that strictly outputs either 'TRAVEL_PLAN' or 'GENERAL_CHAT'."),
+        HumanMessage(content=classification_prompt)
+    ]).content.strip().upper()
+
+    if "TRAVEL_PLAN" in response:
+        return "travel_plan"
+    else:
+        return "general_chat"
+
+def general_chat_agent(state: TravelState):
+    """Handles greetings and off-topic queries without triggering travel tools or hallucinating."""
+    query = state["user_query"].strip()
+    prompt = f"""
+    You are an AI Travel Planning Assistant.
+    If the user is greeting you (e.g., 'hi', 'hello'), respond warmly and invite them to share their travel destination, dates, or preferences.
+    If the query is completely unrelated to travel, politely explain:
+    "I am specialized in travel planning (flights, hotels, and itineraries). I cannot assist with unrelated topics, but feel free to ask me for travel recommendations!"
+
+    User Input: "{query}"
+    """
+    response = llm.invoke([
+        SystemMessage(content="You are a helpful travel assistant. Stick strictly to travel topics."),
+        HumanMessage(content=prompt)
+    ])
+    return {
+        "messages": [response],
+        "llm_calls": state.get("llm_calls", 0) + 1
+    }
 
 def flight_agent(state: TravelState):
     query = state["user_query"]
@@ -113,19 +155,35 @@ def final_agent(state: TravelState):
         "llm_calls": state.get("llm_calls", 0) + 1
     }
 
+# Graph Construction
 graph = StateGraph(TravelState)
 
 graph.add_node("flight_agent", flight_agent)
 graph.add_node("hotel_agent", hotel_agent)
 graph.add_node("itinerary_agent", itinerary_agent)
 graph.add_node("final_agent", final_agent)
+graph.add_node("general_chat", general_chat_agent)
 
-graph.add_edge(START, "flight_agent")
+# Conditional Entry Point Routing
+graph.add_conditional_edges(
+    START,
+    intent_classifier,
+    {
+        "travel_plan": "flight_agent",
+        "general_chat": "general_chat"
+    }
+)
+
+# Travel Workflow Edges
 graph.add_edge("flight_agent", "hotel_agent")
 graph.add_edge("hotel_agent", "itinerary_agent")
 graph.add_edge("itinerary_agent", "final_agent")
 graph.add_edge("final_agent", END)
 
+# Fallback Workflow Edges
+graph.add_edge("general_chat", END)
+
+# Database Checkpointer Setup
 _conn = psycopg.connect(DATABASE_URL, autocommit=True)
 checkpointer = PostgresSaver(_conn)
 checkpointer.setup()
@@ -154,5 +212,5 @@ if __name__ == "__main__":
         },
         config=config
     )
-    print("\n=== FINAL TRAVEL PLAN ===\n")
+    print("\n=== RESPONSE ===\n")
     print(result["messages"][-1].content)
